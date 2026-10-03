@@ -111,6 +111,15 @@ def decompose(nodes):
             n.decompose()
 
 
+def drop_void(tag):
+    """Remove a void tag (link/meta). html.parser sometimes nests following content inside
+    these, so keep any children instead of deleting them with the tag."""
+    if tag.contents:
+        tag.unwrap()
+    else:
+        tag.decompose()
+
+
 def strip_shopify(soup, path):
     # --- scripts ---
     for sc in soup.find_all("script"):
@@ -151,13 +160,13 @@ def strip_shopify(soup, path):
         if (rel in ("ucp", "preconnect", "dns-prefetch") or "shopify" in href or ".atom" in href
                 or link.get("hreflang") or name in DROP_CSS or href.startswith("/cart")
                 or (link.get("as") == "script")):
-            link.decompose()
+            drop_void(link)
     for meta in soup.find_all("meta"):
         if meta.decomposed:
             continue
         n = (meta.get("name") or meta.get("property") or "")
         if n.startswith("shopify") or n in ("og:price:amount", "og:price:currency"):
-            meta.decompose()
+            drop_void(meta)
 
     # --- checkout/wallet styles injected by Shopify ---
     for st in soup.find_all("style"):
@@ -225,6 +234,41 @@ def strip_shopify(soup, path):
         for attr in ("data-url", "data-product-id", "data-section-id"):
             pr.attrs.pop(attr, None)
         strip_shopify_fragment(pr)
+    # --- variant pickers: show the options as plain text instead of a selector ---
+    for vs in soup.select("variant-selects, variant-radios"):
+        lines = []
+        for fs in vs.select("fieldset"):
+            legend = fs.find("legend")
+            name = legend.get_text(" ", strip=True) if legend else "Options"
+            values = []
+            for inp in fs.select("input[type=radio]"):
+                v = inp.get("value")
+                if v and v not in values:
+                    values.append(v)
+            if values:
+                lines.append(f"<p><strong>{name}:</strong> {', '.join(values)}</p>")
+        for sel in vs.select("select"):
+            label = vs.find("label", attrs={"for": sel.get("id")})
+            name = label.get_text(" ", strip=True) if label else "Options"
+            values = [o.get("value") for o in sel.find_all("option") if o.get("value")]
+            if values:
+                lines.append(f"<p><strong>{name}:</strong> {', '.join(values)}</p>")
+        vs.replace_with(BeautifulSoup(f'<div class="product__text rte">{"".join(lines)}</div>',
+                                      "html.parser"))
+    decompose(soup.select(".label-unavailable"))
+
+    # --- stock labels: this is a display site, not a shop ---
+    for b in soup.select(".badge"):
+        if b.decomposed:
+            continue
+        text = b.get_text(" ", strip=True).lower()
+        if "price__badge-sold-out" in b.get("class", []) or "sold out" in text or "available" in text:
+            b.decompose()
+    for wrap in soup.select(".card__badge"):
+        if not wrap.get_text(strip=True):
+            wrap.decompose()
+    for el in soup.select(".price--sold-out"):
+        el["class"] = [c for c in el["class"] if c != "price--sold-out"]
     # HTML comments from Shopify apps
     from bs4 import Comment
     for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
